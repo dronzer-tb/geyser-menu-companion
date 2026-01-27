@@ -1,0 +1,20 @@
+name: GeyserMenuCompanion
+version: ${version}
+main: com.geysermenu.companion.spigot.GeyserMenuSpigot
+api-version: '1.20'
+author: kasniya
+description: Companion plugin for GeyserMenu - API for sending menus to Bedrock players
+softdepend:
+  - floodgate
+
+commands:
+  geysermenu:
+    description: GeyserMenu companion commands
+    aliases: [gm, gmenu]
+    permission: geysermenu.admin
+    usage: /<command> [reload|status]
+
+permissions:
+  geysermenu.admin:
+    description: Access to GeyserMenu admin commands
+    default: op

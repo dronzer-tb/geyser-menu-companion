@@ -1,0 +1,1 @@
+{"id":"geysermenucompanion","name":"GeyserMenuCompanion","version":"1.0.0-SNAPSHOT","description":"Companion plugin for GeyserMenu - API for sending menus to Bedrock players","authors":["kasniya"],"dependencies":[{"id":"floodgate","optional":true}],"main":"com.geysermenu.companion.velocity.GeyserMenuVelocity"}

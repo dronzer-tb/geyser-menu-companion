@@ -1,0 +1,25 @@
+# GeyserMenuCompanion Configuration
+
+# Connection settings for the GeyserMenu extension
+connection:
+  # Host where the GeyserMenu extension is running
+  host: "127.0.0.1"
+
+  # TCP port for communication (must match the extension's config)
+  port: 19133
+
+  # Secret key for authentication (must match the extension's config)
+  secret-key: "CHANGE_ME"
+
+  # Identifier for this server (useful for multi-server setups)
+  server-identifier: "spigot-server"
+
+  # Automatically reconnect if connection is lost
+  auto-reconnect: true
+
+  # Delay between reconnection attempts (seconds)
+  reconnect-delay: 5
+
+  # Enable SSL/TLS encryption (must match the extension's config)
+  # Set to false for better compatibility, the secret-key provides authentication
+  enable-ssl: false
