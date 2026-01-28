@@ -7,6 +7,7 @@ import com.geysermenu.companion.spigot.api.SpigotGeyserMenuAPI;
 import com.geysermenu.companion.spigot.config.SpigotConfig;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public class GeyserMenuSpigot extends JavaPlugin {
@@ -65,6 +66,12 @@ public class GeyserMenuSpigot extends JavaPlugin {
             getLogger().warning("Connection to GeyserMenu extension lost!");
         });
 
+        // Resync buttons when authentication succeeds (important for reconnection)
+        menuClient.onAuthSuccess(() -> {
+            getLogger().info("Authenticated with GeyserMenu extension, syncing buttons...");
+            api.resyncButtons();
+        });
+
         menuClient.onButtonClick(click -> {
             // Find player and call API handler
             java.util.UUID playerUuid = java.util.UUID.fromString(click.getPlayerUuid());
@@ -78,8 +85,6 @@ public class GeyserMenuSpigot extends JavaPlugin {
         menuClient.connect().thenAccept(success -> {
             if (success) {
                 getLogger().info("Successfully connected to GeyserMenu extension!");
-                // Sync any already registered buttons
-                api.resyncButtons();
             } else {
                 getLogger().warning("Failed to connect to GeyserMenu extension. Will retry...");
             }
@@ -88,6 +93,12 @@ public class GeyserMenuSpigot extends JavaPlugin {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        // Handle /gemu command - opens the menu for bedrock players or reorders buttons
+        if (command.getName().equalsIgnoreCase("gemu")) {
+            return handleGemuCommand(sender, args);
+        }
+        
+        // Handle /geysermenu admin command
         if (!sender.hasPermission("geysermenu.admin")) {
             sender.sendMessage("You don't have permission to use this command.");
             return true;
@@ -122,6 +133,96 @@ public class GeyserMenuSpigot extends JavaPlugin {
             default -> sender.sendMessage("Unknown subcommand. Use: reload, status, reconnect");
         }
 
+        return true;
+    }
+    
+    /**
+     * Handle the /gemu command to open the GeyserMenu for Bedrock players
+     * or reorder buttons with syntax: /gemu p:<name> s:<position>
+     */
+    private boolean handleGemuCommand(CommandSender sender, String[] args) {
+        // Check for button reorder syntax: /gemu p:<name> s:<position>
+        if (args.length >= 2) {
+            return handleButtonReorder(sender, args);
+        }
+        
+        // Standard menu open for players
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("This command can only be used by players.");
+            sender.sendMessage("§eAdmin usage: /gemu p:<button_name> s:<position>");
+            return true;
+        }
+        
+        if (!menuClient.isConnected()) {
+            player.sendMessage("§cGeyserMenu is not connected. Please try again later.");
+            return true;
+        }
+        
+        // Check if player is a Bedrock player
+        if (floodgateAvailable) {
+            try {
+                org.geysermc.floodgate.api.FloodgateApi floodgate = org.geysermc.floodgate.api.FloodgateApi.getInstance();
+                if (!floodgate.isFloodgatePlayer(player.getUniqueId())) {
+                    player.sendMessage("§cThis command is only available for Bedrock players.");
+                    return true;
+                }
+            } catch (Exception e) {
+                getLogger().warning("Error checking Floodgate status: " + e.getMessage());
+            }
+        }
+        
+        // Request the extension to open the main menu
+        menuClient.requestOpenMainMenu(player.getUniqueId());
+        getLogger().info("Requested menu open for player: " + player.getName());
+        return true;
+    }
+    
+    /**
+     * Handle button reordering: /gemu p:<name> s:<position>
+     */
+    private boolean handleButtonReorder(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("geysermenu.admin")) {
+            sender.sendMessage("§cYou don't have permission to reorder buttons.");
+            return true;
+        }
+        
+        if (!menuClient.isConnected()) {
+            sender.sendMessage("§cGeyserMenu is not connected.");
+            return true;
+        }
+        
+        String buttonName = null;
+        Integer position = null;
+        
+        // Parse arguments: p:<name> s:<position>
+        for (String arg : args) {
+            if (arg.toLowerCase().startsWith("p:")) {
+                buttonName = arg.substring(2);
+            } else if (arg.toLowerCase().startsWith("s:")) {
+                try {
+                    position = Integer.parseInt(arg.substring(2));
+                } catch (NumberFormatException e) {
+                    sender.sendMessage("§cInvalid position number: " + arg.substring(2));
+                    return true;
+                }
+            }
+        }
+        
+        if (buttonName == null || buttonName.isEmpty()) {
+            sender.sendMessage("§cButton name not specified. Usage: /gemu p:<button_name> s:<position>");
+            sender.sendMessage("§7Example: /gemu p:spawn s:1");
+            return true;
+        }
+        
+        if (position == null || position < 1) {
+            sender.sendMessage("§cPosition not specified or invalid. Usage: /gemu p:<button_name> s:<position>");
+            sender.sendMessage("§7Position must be 1 or greater (1 = first)");
+            return true;
+        }
+        
+        // Send reorder request to extension
+        menuClient.requestReorderButton(buttonName, position);
+        sender.sendMessage("§aButton '" + buttonName + "' moved to position " + position);
         return true;
     }
 

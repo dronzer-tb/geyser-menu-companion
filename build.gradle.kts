@@ -4,8 +4,7 @@ plugins {
 
 allprojects {
     group = "com.geysermenu"
-    version = "1.0.0-SNAPSHOT"
-
+version = "1.1.4"
     repositories {
         mavenCentral()
         maven("https://repo.papermc.io/repository/maven-public/")

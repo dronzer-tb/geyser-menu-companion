@@ -29,6 +29,8 @@ public class Packet {
         REGISTER_BUTTONS,   // Client -> Server: Register menu buttons from companion
         BUTTON_CLICKED,     // Server -> Client: A registered button was clicked
         REQUEST_BUTTONS,    // Server -> Client: Request companion to send registered buttons
+        OPEN_MAIN_MENU,     // Client -> Server: Request to open main menu for a player
+        REORDER_BUTTON,     // Client -> Server: Reorder a button to a specific position
 
         // Player state
         PLAYER_JOIN,

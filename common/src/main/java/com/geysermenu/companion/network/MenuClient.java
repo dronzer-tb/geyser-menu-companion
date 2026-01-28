@@ -54,6 +54,7 @@ public class MenuClient {
     private Consumer<PlayerEvent> playerLeaveListener;
     private Consumer<String> errorListener;
     private Runnable connectionLostListener;
+    private Runnable authSuccessListener;
 
     private ScheduledExecutorService reconnectExecutor;
     private boolean autoReconnect = true;
@@ -154,14 +155,21 @@ public class MenuClient {
 
         if (reconnectExecutor != null) {
             reconnectExecutor.shutdown();
+            try {
+                reconnectExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {}
         }
 
         if (channel != null && channel.isActive()) {
-            channel.close();
+            try {
+                channel.close().sync();
+            } catch (InterruptedException ignored) {}
         }
 
         if (workerGroup != null) {
-            workerGroup.shutdownGracefully();
+            try {
+                workerGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+            } catch (InterruptedException ignored) {}
         }
 
         logger.info("Disconnected from GeyserMenu");
@@ -214,6 +222,10 @@ public class MenuClient {
         if (authData.isSuccess()) {
             authenticated = true;
             logger.info("Authentication successful: " + authData.getMessage());
+            // Notify listener that authentication completed
+            if (authSuccessListener != null) {
+                authSuccessListener.run();
+            }
         } else {
             authenticated = false;
             logger.warning("Authentication failed: " + authData.getMessage());
@@ -332,6 +344,47 @@ public class MenuClient {
     public Consumer<ButtonData.ButtonClick> getButtonClickListener() {
         return buttonClickListener;
     }
+    
+    /**
+     * Request the GeyserMenu extension to open the main menu for a player.
+     * This is used as a fallback when double-click inventory detection fails.
+     * 
+     * @param playerUuid The UUID of the player to open the menu for
+     */
+    public void requestOpenMainMenu(UUID playerUuid) {
+        if (!authenticated) {
+            logger.warning("Cannot request open menu - not authenticated");
+            return;
+        }
+        
+        Map<String, String> data = new java.util.HashMap<>();
+        data.put("playerUuid", playerUuid.toString());
+        
+        Packet packet = new Packet(Packet.PacketType.OPEN_MAIN_MENU, GSON.toJson(data));
+        sendPacket(packet);
+        logger.info("Requested main menu open for player: " + playerUuid);
+    }
+    
+    /**
+     * Request the GeyserMenu extension to reorder a button to a specific position.
+     * 
+     * @param buttonName The name or ID of the button to reorder
+     * @param position The desired position (1-based, 1 = first)
+     */
+    public void requestReorderButton(String buttonName, int position) {
+        if (!authenticated) {
+            logger.warning("Cannot reorder button - not authenticated");
+            return;
+        }
+        
+        Map<String, Object> data = new java.util.HashMap<>();
+        data.put("buttonName", buttonName);
+        data.put("position", position);
+        
+        Packet packet = new Packet(Packet.PacketType.REORDER_BUTTON, GSON.toJson(data));
+        sendPacket(packet);
+        logger.info("Requested button reorder: " + buttonName + " -> position " + position);
+    }
 
     // Listeners
     public void onPlayerJoin(Consumer<PlayerEvent> listener) {
@@ -348,6 +401,10 @@ public class MenuClient {
 
     public void onConnectionLost(Runnable listener) {
         this.connectionLostListener = listener;
+    }
+
+    public void onAuthSuccess(Runnable listener) {
+        this.authSuccessListener = listener;
     }
 
     public void setAutoReconnect(boolean autoReconnect) {
