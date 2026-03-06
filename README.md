@@ -1,10 +1,10 @@
 # GeyserMenu Companion
 
 [![Modrinth](https://img.shields.io/modrinth/v/geysermenu-companion?logo=modrinth&label=Modrinth)](https://modrinth.com/plugin/geysermenu-companion)
-[![GitHub Release](https://img.shields.io/github/v/release/yourusername/geyser-menu-companion)](https://github.com/yourusername/geyser-menu-companion/releases)
-[![License](https://img.shields.io/github/license/yourusername/geyser-menu-companion)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/dronzer-tb/geyser-menu-companion)](https://github.com/dronzer-tb/geyser-menu-companion/releases)
+[![License](https://img.shields.io/github/license/dronzer-tb/geyser-menu-companion)](LICENSE)
 
-A multi-platform companion plugin for [GeyserMenu](https://github.com/yourusername/geyser-menu) that provides a server-side API for registering menu buttons and handling player interactions.
+A multi-platform companion plugin for [GeyserMenu](https://github.com/dronzer-tb/geyser-menu) that provides a server-side API for registering menu buttons and handling player interactions.
 
 ## Features
 
@@ -24,7 +24,7 @@ A multi-platform companion plugin for [GeyserMenu](https://github.com/youruserna
 
 ## Installation
 
-1. Download the appropriate JAR for your platform from [Modrinth](https://modrinth.com/plugin/geysermenu-companion) or [GitHub Releases](https://github.com/yourusername/geyser-menu-companion/releases)
+1. Download the appropriate JAR for your platform from [Modrinth](https://modrinth.com/plugin/geysermenu-companion) or [GitHub Releases](https://github.com/dronzer-tb/geyser-menu-companion/releases)
 2. Place in your `plugins/` folder
 3. Configure `config.yml` with your GeyserMenu extension details
 4. Restart your server
@@ -438,8 +438,8 @@ public class MyPlugin extends JavaPlugin {
 ```
 
 Outputs:
-- `spigot/build/libs/GeyserMenuCompanion-Spigot-1.1.4.jar`
-- `velocity/build/libs/GeyserMenuCompanion-Velocity-1.1.4.jar`
+- `spigot/build/libs/GeyserMenuCompanion-Spigot-1.1.6.jar`
+- `velocity/build/libs/GeyserMenuCompanion-Velocity-1.1.6.jar`
 
 ## Project Structure
 
