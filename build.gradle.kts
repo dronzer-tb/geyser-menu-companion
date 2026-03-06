@@ -1,10 +1,11 @@
 plugins {
     java
+    id("com.modrinth.minotaur") version "2.+" apply false
 }
 
 allprojects {
     group = "com.geysermenu"
-version = "1.1.4"
+version = "1.1.6"
     repositories {
         mavenCentral()
         maven("https://repo.papermc.io/repository/maven-public/")

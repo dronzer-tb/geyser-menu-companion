@@ -1,6 +1,7 @@
 plugins {
     java
     id("com.gradleup.shadow") version "9.0.0-beta4"
+    id("com.modrinth.minotaur") version "2.+"
 }
 
 dependencies {
@@ -15,6 +16,7 @@ dependencies {
 
 tasks.shadowJar {
     archiveClassifier.set("")
+    archiveBaseName.set("GeyserMenuCompanion-Spigot")
     relocate("io.netty", "com.geysermenu.companion.libs.netty")
     relocate("com.google.gson", "com.geysermenu.companion.libs.gson")
 }
@@ -29,5 +31,26 @@ tasks.processResources {
     filteringCharset = "UTF-8"
     filesMatching("plugin.yml") {
         expand(props)
+    }
+}
+
+modrinth {
+    token.set(System.getenv("MODRINTH_TOKEN"))
+    projectId.set("geysermenu-companion")  // Your Modrinth project ID/slug
+    versionNumber.set("${project.version}-spigot")
+    versionName.set("GeyserMenu Companion ${project.version} (Spigot/Paper)")
+    versionType.set("release")
+    uploadFile.set(tasks.shadowJar)
+    gameVersions.addAll("1.20.4", "1.20.5", "1.20.6", "1.21", "1.21.1", "1.21.2", "1.21.3", "1.21.4", "1.21.5")
+    loaders.addAll("spigot", "paper", "purpur", "folia")
+    changelog.set("""
+        ## Changes in ${project.version}
+        - Fixed button resync after player reconnection
+        - Improved TCP connection stability
+        - Fixed Netty thread shutdown on server stop
+    """.trimIndent())
+    
+    dependencies {
+        required.project("floodgate")
     }
 }
