@@ -454,3 +454,37 @@ geyser-menu-companion/
 ## License
 
 MIT License
+
+---
+
+## 🧵 Folia Support
+
+The Spigot plugin runs on [Folia](https://papermc.io/software/folia)'s regionised
+threading as well as regular Paper and Spigot.
+
+Button-click packets arrive on a **Netty IO thread**. Prior versions called
+`Bukkit.getPlayer()` there and then `getScheduler().runTask(...)` — and
+`Bukkit.getScheduler()` throws `UnsupportedOperationException` on Folia, so every menu
+interaction failed. Clicks now hop **IO thread → global region thread** (for the player
+lookup) **→ that player's entity scheduler** (for the command and any `onClick`
+handler), re-validating the player is online at each step.
+
+All legacy scheduler use is confined to a single `FoliaScheduler` facade, in branches
+reachable only on plain Spigot.
+
+> **For API consumers:** your `onClick` handler runs on the **clicking player's** region
+> thread. That is correct for anything touching *that* player. If your handler touches a
+> different player, a block, or another world, you must hop onto the right scheduler
+> yourself — Folia will throw otherwise.
+
+---
+
+## 🤖 AI Disclaimer
+
+Parts of this project were written with the assistance of AI (Anthropic's Claude) —
+specifically the Folia port of the Spigot module, along with sections of this README.
+
+Every AI-authored change was compiled and statically verified against the target
+server API before release: the built jars were scanned to confirm every `BukkitScheduler` reference is confined to the Folia-safe scheduler facade.
+That is **not** the same as being play-tested. Treat this as reviewed-but-unproven
+code, and please open an issue if you hit a bug.
