@@ -2,6 +2,9 @@ name: GeyserMenuCompanion
 version: ${version}
 main: com.geysermenu.companion.spigot.GeyserMenuSpigot
 api-version: '1.20'
+# Every scheduler hop in this plugin goes through the region/entity/async schedulers
+# (com.geysermenu.companion.spigot.scheduler.FoliaScheduler); no Bukkit scheduler use remains.
+folia-supported: true
 author: kasniya
 description: Companion plugin for GeyserMenu - API for sending menus to Bedrock players
 softdepend:

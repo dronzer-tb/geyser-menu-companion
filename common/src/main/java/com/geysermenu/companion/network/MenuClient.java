@@ -20,11 +20,13 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.CharsetUtil;
+import io.netty.util.concurrent.EventExecutor;
 
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 
@@ -42,23 +44,33 @@ public class MenuClient {
     private final Logger logger;
     private final boolean enableSsl;
 
-    private EventLoopGroup workerGroup;
-    private Channel channel;
-    private SslContext sslContext;
+    /** Pending menu callbacks are dropped after this long so an unanswered form cannot leak. */
+    private static final long CALLBACK_TTL_MILLIS = TimeUnit.MINUTES.toMillis(5);
 
-    private boolean connected = false;
-    private boolean authenticated = false;
+    // Everything below is written on Netty IO threads and read from server threads (on Folia,
+    // from several region threads concurrently), so every cross-thread field is volatile and
+    // every collection is concurrent.
+    private volatile EventLoopGroup workerGroup;
+    private volatile Channel channel;
+    private volatile SslContext sslContext;
 
-    private final Map<String, Consumer<MenuResponse>> responseCallbacks = new ConcurrentHashMap<>();
-    private Consumer<PlayerEvent> playerJoinListener;
-    private Consumer<PlayerEvent> playerLeaveListener;
-    private Consumer<String> errorListener;
-    private Runnable connectionLostListener;
-    private Runnable authSuccessListener;
+    private volatile boolean connected = false;
+    private volatile boolean authenticated = false;
+    private volatile boolean shuttingDown = false;
 
-    private ScheduledExecutorService reconnectExecutor;
-    private boolean autoReconnect = true;
-    private int reconnectDelaySeconds = 5;
+    private final Map<String, PendingCallback> responseCallbacks = new ConcurrentHashMap<>();
+    private volatile Consumer<PlayerEvent> playerJoinListener;
+    private volatile Consumer<PlayerEvent> playerLeaveListener;
+    private volatile Consumer<String> errorListener;
+    private volatile Runnable connectionLostListener;
+    private volatile Runnable authSuccessListener;
+
+    private volatile ScheduledExecutorService reconnectExecutor;
+    private final AtomicBoolean reconnectPending = new AtomicBoolean(false);
+    private volatile boolean autoReconnect = true;
+    private volatile int reconnectDelaySeconds = 5;
+
+    private record PendingCallback(Consumer<MenuResponse> callback, long createdAtMillis) {}
 
     public MenuClient(String host, int port, String secretKey, String serverIdentifier, Logger logger, boolean enableSsl) {
         this.host = host;
@@ -82,21 +94,39 @@ public class MenuClient {
     public CompletableFuture<Boolean> connect() {
         CompletableFuture<Boolean> future = new CompletableFuture<>();
 
+        if (shuttingDown) {
+            future.complete(false);
+            return future;
+        }
+
         try {
             // Trust all certificates (for self-signed cert on extension) if SSL enabled
-            if (enableSsl) {
+            if (enableSsl && sslContext == null) {
                 sslContext = SslContextBuilder.forClient()
                         .trustManager(InsecureTrustManagerFactory.INSTANCE)
                         .build();
             }
 
-            workerGroup = new NioEventLoopGroup();
+            // Reuse one event loop group for the life of this client. The previous code allocated
+            // a fresh NioEventLoopGroup on *every* reconnect attempt and never shut the old one
+            // down, so a flapping connection leaked 2*cores threads every reconnect-delay seconds.
+            // One IO thread is plenty for a single client socket, and on Folia every extra idle
+            // thread competes with the region threads for cores.
+            EventLoopGroup group = workerGroup;
+            if (group == null || group.isShuttingDown() || group.isShutdown() || group.isTerminated()) {
+                group = new NioEventLoopGroup(1, runnable -> {
+                    Thread thread = new Thread(runnable, "GeyserMenu-Netty");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+                workerGroup = group;
+            }
 
             final boolean useSsl = enableSsl;
             final SslContext finalSslContext = sslContext;
 
             Bootstrap bootstrap = new Bootstrap();
-            bootstrap.group(workerGroup)
+            bootstrap.group(group)
                     .channel(NioSocketChannel.class)
                     .option(ChannelOption.SO_KEEPALIVE, true)
                     .handler(new ChannelInitializer<SocketChannel>() {
@@ -125,7 +155,10 @@ public class MenuClient {
                     // Send authentication
                     authenticate();
                 } else {
-                    logger.warning("Failed to connect to GeyserMenu: " + cf.cause().getMessage());
+                    logger.warning("Failed to connect to GeyserMenu: "
+                            + (cf.cause() == null ? "unknown error" : cf.cause().getMessage()));
+                    connected = false;
+                    authenticated = false;
                     future.complete(false);
                     scheduleReconnect();
                 }
@@ -134,6 +167,7 @@ public class MenuClient {
         } catch (Exception e) {
             logger.severe("Error connecting to GeyserMenu: " + e.getMessage());
             future.complete(false);
+            scheduleReconnect();
         }
 
         return future;
@@ -149,30 +183,57 @@ public class MenuClient {
      * Disconnect from the extension
      */
     public void disconnect() {
+        shuttingDown = true;
         autoReconnect = false;
         connected = false;
         authenticated = false;
+        responseCallbacks.clear();
 
-        if (reconnectExecutor != null) {
-            reconnectExecutor.shutdown();
-            try {
-                reconnectExecutor.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException ignored) {}
+        ScheduledExecutorService executor = this.reconnectExecutor;
+        this.reconnectExecutor = null;
+        reconnectPending.set(false);
+        if (executor != null) {
+            executor.shutdownNow();
         }
 
-        if (channel != null && channel.isActive()) {
-            try {
-                channel.close().sync();
-            } catch (InterruptedException ignored) {}
+        Channel currentChannel = this.channel;
+        EventLoopGroup group = this.workerGroup;
+        this.channel = null;
+        this.workerGroup = null;
+
+        // handleAuthResponse() calls disconnect() straight off the Netty IO thread. Blocking that
+        // thread on its own channel close / group shutdown throws BlockingOperationException (or
+        // deadlocks), so only wait when we are NOT on a Netty thread.
+        boolean onNettyThread = inEventLoop(group)
+                || (currentChannel != null && currentChannel.eventLoop().inEventLoop());
+
+        if (currentChannel != null) {
+            ChannelFuture closeFuture = currentChannel.close();
+            if (!onNettyThread) {
+                closeFuture.awaitUninterruptibly(3, TimeUnit.SECONDS);
+            }
         }
 
-        if (workerGroup != null) {
-            try {
-                workerGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
-            } catch (InterruptedException ignored) {}
+        if (group != null) {
+            io.netty.util.concurrent.Future<?> shutdownFuture = group.shutdownGracefully(0, 3, TimeUnit.SECONDS);
+            if (!onNettyThread) {
+                shutdownFuture.awaitUninterruptibly(4, TimeUnit.SECONDS);
+            }
         }
 
         logger.info("Disconnected from GeyserMenu");
+    }
+
+    private static boolean inEventLoop(EventLoopGroup group) {
+        if (group == null) {
+            return false;
+        }
+        for (EventExecutor executor : group) {
+            if (executor.inEventLoop()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -184,8 +245,11 @@ public class MenuClient {
             return;
         }
 
-        // Store callback for response
-        responseCallbacks.put(menuData.getFormId(), callback);
+        // Store callback for response. Responses arrive over the network and may never arrive at
+        // all, so evict stale entries instead of growing this map without bound.
+        long now = System.currentTimeMillis();
+        responseCallbacks.values().removeIf(pending -> now - pending.createdAtMillis() > CALLBACK_TTL_MILLIS);
+        responseCallbacks.put(menuData.getFormId(), new PendingCallback(callback, now));
 
         Packet packet = new Packet(Packet.PacketType.SEND_MENU, GSON.toJson(menuData));
         sendPacket(packet);
@@ -206,6 +270,9 @@ public class MenuClient {
     }
 
     void handlePacket(Packet packet) {
+        if (packet == null || packet.getType() == null) {
+            return;
+        }
         switch (packet.getType()) {
             case AUTH_RESPONSE -> handleAuthResponse(packet);
             case MENU_RESPONSE -> handleMenuResponse(packet);
@@ -222,9 +289,16 @@ public class MenuClient {
         if (authData.isSuccess()) {
             authenticated = true;
             logger.info("Authentication successful: " + authData.getMessage());
-            // Notify listener that authentication completed
-            if (authSuccessListener != null) {
-                authSuccessListener.run();
+            // Notify listener that authentication completed. Fires on the Netty IO thread -
+            // platform implementations are responsible for hopping to a server thread if they
+            // touch the server API.
+            Runnable listener = authSuccessListener;
+            if (listener != null) {
+                try {
+                    listener.run();
+                } catch (Throwable t) {
+                    logger.warning("Error in auth-success listener: " + t);
+                }
             }
         } else {
             authenticated = false;
@@ -236,9 +310,9 @@ public class MenuClient {
     private void handleMenuResponse(Packet packet) {
         MenuResponse response = GSON.fromJson(packet.getPayload(), MenuResponse.class);
 
-        Consumer<MenuResponse> callback = responseCallbacks.remove(response.getFormId());
-        if (callback != null) {
-            callback.accept(response);
+        PendingCallback pending = responseCallbacks.remove(response.getFormId());
+        if (pending != null) {
+            pending.callback().accept(response);
         }
     }
 
@@ -277,43 +351,88 @@ public class MenuClient {
 
     private void handleButtonClick(Packet packet) {
         ButtonData.ButtonClick click = GSON.fromJson(packet.getPayload(), ButtonData.ButtonClick.class);
-        if (buttonClickListener != null) {
-            buttonClickListener.accept(click);
+        Consumer<ButtonData.ButtonClick> listener = buttonClickListener;
+        if (click != null && listener != null) {
+            // Netty IO thread. The platform listener must hop onto a server thread itself.
+            try {
+                listener.accept(click);
+            } catch (Throwable t) {
+                logger.warning("Error in button-click listener: " + t);
+            }
         }
     }
 
     void onConnectionLost() {
+        if (shuttingDown) {
+            return;
+        }
         connected = false;
         authenticated = false;
         logger.warning("Connection to GeyserMenu lost");
 
-        if (connectionLostListener != null) {
-            connectionLostListener.run();
+        Runnable listener = connectionLostListener;
+        if (listener != null) {
+            try {
+                listener.run();
+            } catch (Throwable t) {
+                logger.warning("Error in connection-lost listener: " + t);
+            }
         }
 
         scheduleReconnect();
     }
 
+    /**
+     * Schedule a reconnect attempt on this client's own daemon executor.
+     *
+     * <p>Deliberately NOT a Bukkit/BukkitRunnable task: {@code Bukkit.getScheduler()} throws
+     * {@link UnsupportedOperationException} on Folia, and this module is also used by the Velocity
+     * build, which has no Bukkit at all. A plain single daemon thread works identically on Folia,
+     * Paper, Spigot and Velocity, and reconnect work never touches the server API anyway.
+     */
     private void scheduleReconnect() {
-        if (!autoReconnect) return;
+        if (!autoReconnect || shuttingDown) return;
 
-        if (reconnectExecutor == null || reconnectExecutor.isShutdown()) {
-            reconnectExecutor = Executors.newSingleThreadScheduledExecutor();
+        // Connection-lost and connect-failure can both fire for the same drop; keep exactly one
+        // attempt in flight rather than doubling the reconnect rate every failure.
+        if (!reconnectPending.compareAndSet(false, true)) {
+            return;
+        }
+
+        ScheduledExecutorService executor = this.reconnectExecutor;
+        if (executor == null || executor.isShutdown()) {
+            executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "GeyserMenu-Reconnect");
+                thread.setDaemon(true);
+                return thread;
+            });
+            this.reconnectExecutor = executor;
         }
 
         logger.info("Scheduling reconnect in " + reconnectDelaySeconds + " seconds...");
-        reconnectExecutor.schedule(this::connect, reconnectDelaySeconds, TimeUnit.SECONDS);
+        try {
+            executor.schedule(() -> {
+                reconnectPending.set(false);
+                if (!shuttingDown && autoReconnect) {
+                    connect();
+                }
+            }, reconnectDelaySeconds, TimeUnit.SECONDS);
+        } catch (RejectedExecutionException e) {
+            reconnectPending.set(false);
+        }
     }
 
     private void sendPacket(Packet packet) {
-        if (channel != null && channel.isActive()) {
-            channel.writeAndFlush(GSON.toJson(packet));
+        Channel currentChannel = this.channel;
+        if (currentChannel != null && currentChannel.isActive()) {
+            // writeAndFlush is thread-safe: Netty hands the write to the channel's event loop.
+            currentChannel.writeAndFlush(GSON.toJson(packet));
         }
     }
 
     // ==================== Button Registration ====================
     
-    private Consumer<ButtonData.ButtonClick> buttonClickListener;
+    private volatile Consumer<ButtonData.ButtonClick> buttonClickListener;
     
     /**
      * Send registered buttons to the GeyserMenu extension.
@@ -425,5 +544,3 @@ public class MenuClient {
 
     public record PlayerEvent(UUID uuid, String name, String xuid) {}
 }
-
-// PATCH: Add this import at the top

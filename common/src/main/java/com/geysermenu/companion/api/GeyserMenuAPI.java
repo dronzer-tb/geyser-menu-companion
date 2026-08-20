@@ -62,7 +62,9 @@ import java.util.function.Consumer;
  */
 public abstract class GeyserMenuAPI {
 
-    private static GeyserMenuAPI instance;
+    // Set once on enable from a server thread, read from Netty IO threads and (on Folia) from
+    // any region thread - must be safely published.
+    private static volatile GeyserMenuAPI instance;
 
     /**
      * Get the GeyserMenuAPI instance
