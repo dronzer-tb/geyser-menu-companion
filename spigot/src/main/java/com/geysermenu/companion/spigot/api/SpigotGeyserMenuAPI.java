@@ -8,6 +8,7 @@ import com.geysermenu.companion.protocol.ButtonData;
 import com.geysermenu.companion.menu.MenuData;
 import com.geysermenu.companion.menu.MenuResponse;
 import com.geysermenu.companion.spigot.GeyserMenuSpigot;
+import com.geysermenu.companion.spigot.scheduler.FoliaScheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.geysermc.floodgate.api.FloodgateApi;
@@ -97,7 +98,13 @@ public class SpigotGeyserMenuAPI extends GeyserMenuAPI {
     }
 
     /**
-     * Handle a button click from the extension
+     * Handle a button click pushed to us by the GeyserMenu extension.
+     *
+     * <p>This is invoked on a Netty IO thread. Nothing below may touch the Bukkit API on that
+     * thread, and on Folia the correct thread for anything player-facing is that player's own
+     * region thread, so both the command dispatch and the third-party onClick handler are hopped
+     * onto the player's entity scheduler. If the player is offline the click is dropped rather
+     * than run on the wrong thread.
      */
     public void handleButtonClick(String buttonId, BedrockPlayer player, Object session) {
         MenuButton button = registeredButtons.get(buttonId);
@@ -106,22 +113,32 @@ public class SpigotGeyserMenuAPI extends GeyserMenuAPI {
             return;
         }
 
-        // Execute command if set
-        if (button.getCommand() != null && !button.getCommand().isEmpty()) {
-            Player bukkitPlayer = Bukkit.getPlayer(player.getUuid());
-            if (bukkitPlayer != null) {
-                plugin.getServer().getScheduler().runTask(plugin, () -> {
-                    bukkitPlayer.performCommand(button.getCommand());
-                });
-            }
+        final String command = button.getCommand();
+        final java.util.function.BiConsumer<Object, Object> onClick = button.getOnClick();
+        final boolean hasCommand = command != null && !command.isEmpty();
+
+        if (!hasCommand && onClick == null) {
+            return;
         }
 
-        // Execute onClick handler if set
-        if (button.getOnClick() != null) {
-            plugin.getServer().getScheduler().runTask(plugin, () -> {
-                button.getOnClick().accept(player, session);
-            });
-        }
+        // Netty IO thread -> global region thread (player lookup) -> that player's region thread.
+        FoliaScheduler.runForPlayer(plugin, player.getUuid(), bukkitPlayer -> {
+            if (hasCommand) {
+                try {
+                    bukkitPlayer.performCommand(command);
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("Error running command for button " + buttonId + ": " + t);
+                }
+            }
+            if (onClick != null) {
+                try {
+                    onClick.accept(player, session);
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("Error in onClick handler for button " + buttonId + ": " + t);
+                }
+            }
+        }, () -> plugin.getLogger().warning(
+                "Button '" + buttonId + "' clicked by " + player.getName() + " but that player is not online here"));
     }
 
     /**
@@ -173,6 +190,12 @@ public class SpigotGeyserMenuAPI extends GeyserMenuAPI {
         leaveListeners.add(listener);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Reads the global online-player list, so on Folia this must be called from the global
+     * region thread (see {@link FoliaScheduler#runGlobal}), not from an IO thread.
+     */
     @Override
     public List<BedrockPlayer> getOnlineBedrockPlayers() {
         List<BedrockPlayer> players = new ArrayList<>();
@@ -304,9 +327,15 @@ public class SpigotGeyserMenuAPI extends GeyserMenuAPI {
             return;
         }
 
+        final java.util.UUID target = menuData.getTargetPlayer();
         plugin.getMenuClient().sendMenu(menuData, response -> {
-            // Run callback on main thread
-            plugin.getServer().getScheduler().runTask(plugin, () -> callback.accept(response));
+            // Arrives on a Netty IO thread. Hop onto the target player's region thread so the
+            // caller's handler may safely touch that player; fall back to the global region
+            // thread when the player is no longer online (Folia has no single "main thread").
+            java.util.UUID owner = response.getPlayerUuid() != null ? response.getPlayerUuid() : target;
+            FoliaScheduler.runForPlayer(plugin, owner,
+                    bukkitPlayer -> callback.accept(response),
+                    () -> callback.accept(response));
         });
     }
 

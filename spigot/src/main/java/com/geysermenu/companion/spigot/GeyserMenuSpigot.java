@@ -5,6 +5,7 @@ import com.geysermenu.companion.network.MenuClient;
 import com.geysermenu.companion.api.BedrockPlayer;
 import com.geysermenu.companion.spigot.api.SpigotGeyserMenuAPI;
 import com.geysermenu.companion.spigot.config.SpigotConfig;
+import com.geysermenu.companion.spigot.scheduler.FoliaScheduler;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -12,12 +13,14 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public class GeyserMenuSpigot extends JavaPlugin {
 
-    private static GeyserMenuSpigot instance;
+    private static volatile GeyserMenuSpigot instance;
 
-    private SpigotConfig config;
-    private MenuClient menuClient;
-    private SpigotGeyserMenuAPI api;
-    private boolean floodgateAvailable;
+    // All four are written from a region/command thread and read from Netty IO threads
+    // (and, on Folia, from any of several region threads concurrently) - hence volatile.
+    private volatile SpigotConfig config;
+    private volatile MenuClient menuClient;
+    private volatile SpigotGeyserMenuAPI api;
+    private volatile boolean floodgateAvailable;
 
     @Override
     public void onEnable() {
@@ -37,17 +40,24 @@ public class GeyserMenuSpigot extends JavaPlugin {
         this.api = new SpigotGeyserMenuAPI(this);
         GeyserMenuAPI.setInstance(api);
 
-        // Connect to GeyserMenu extension
+        // Connect to GeyserMenu extension. Netty's connect is non-blocking, so this does not
+        // stall the region thread that is running onEnable.
         connectToExtension();
 
-        getLogger().info("GeyserMenuCompanion has been enabled!");
+        getLogger().info("GeyserMenuCompanion has been enabled! (scheduler: "
+                + (FoliaScheduler.isFolia() ? "Folia regionised"
+                        : FoliaScheduler.hasRegionisedApi() ? "Paper regionised-API"
+                        : "legacy Bukkit") + ")");
     }
 
     @Override
     public void onDisable() {
-        if (menuClient != null) {
-            menuClient.disconnect();
+        FoliaScheduler.cancelTasks(this);
+        MenuClient client = this.menuClient;
+        if (client != null) {
+            client.disconnect();
         }
+        this.menuClient = null;
         getLogger().info("GeyserMenuCompanion has been disabled!");
     }
 
@@ -66,17 +76,32 @@ public class GeyserMenuSpigot extends JavaPlugin {
             getLogger().warning("Connection to GeyserMenu extension lost!");
         });
 
-        // Resync buttons when authentication succeeds (important for reconnection)
+        // Resync buttons when authentication succeeds (important for reconnection).
+        // Fires on the Netty IO thread. resyncButtons() only reads a ConcurrentHashMap and writes
+        // back to the same channel - it deliberately does NOT touch the Bukkit API, so no hop is
+        // needed (and doing the write on the IO thread avoids a needless tick of latency).
         menuClient.onAuthSuccess(() -> {
             getLogger().info("Authenticated with GeyserMenu extension, syncing buttons...");
-            api.resyncButtons();
+            SpigotGeyserMenuAPI currentApi = this.api;
+            if (currentApi != null) {
+                currentApi.resyncButtons();
+            }
         });
 
         menuClient.onButtonClick(click -> {
-            // Find player and call API handler
-            java.util.UUID playerUuid = java.util.UUID.fromString(click.getPlayerUuid());
-            BedrockPlayer player = new BedrockPlayer(playerUuid, click.getXuid(), click.getPlayerName());
-            api.handleButtonClick(click.getButtonId(), player, null);
+            // Runs on a Netty IO thread: parse only here, never touch the Bukkit API.
+            // SpigotGeyserMenuAPI#handleButtonClick performs the hop onto the player's
+            // region/entity scheduler.
+            try {
+                java.util.UUID playerUuid = java.util.UUID.fromString(click.getPlayerUuid());
+                BedrockPlayer player = new BedrockPlayer(playerUuid, click.getXuid(), click.getPlayerName());
+                SpigotGeyserMenuAPI currentApi = this.api;
+                if (currentApi != null) {
+                    currentApi.handleButtonClick(click.getButtonId(), player, null);
+                }
+            } catch (IllegalArgumentException | NullPointerException e) {
+                getLogger().warning("Malformed button click packet from GeyserMenu extension: " + e);
+            }
         });
         menuClient.onError(error -> {
             getLogger().warning("GeyserMenu error: " + error);
@@ -105,7 +130,7 @@ public class GeyserMenuSpigot extends JavaPlugin {
         }
 
         if (args.length == 0) {
-            sender.sendMessage("GeyserMenuCompanion v" + getDescription().getVersion());
+            sender.sendMessage("GeyserMenuCompanion v" + pluginVersion());
             sender.sendMessage("Status: " + (menuClient.isConnected() ? "Connected" : "Disconnected"));
             sender.sendMessage("Commands: /geysermenu [reload|status|reconnect]");
             return true;
@@ -125,10 +150,16 @@ public class GeyserMenuSpigot extends JavaPlugin {
             }
             case "reconnect" -> {
                 sender.sendMessage("Reconnecting to GeyserMenu extension...");
-                if (menuClient != null) {
-                    menuClient.disconnect();
-                }
-                connectToExtension();
+                // disconnect() shuts a Netty event loop group down and waits on it. Never do that
+                // on a region thread - on Folia that stalls every chunk in the region. Run the
+                // whole teardown/reconnect off-thread instead.
+                FoliaScheduler.runAsync(this, () -> {
+                    MenuClient old = this.menuClient;
+                    if (old != null) {
+                        old.disconnect();
+                    }
+                    connectToExtension();
+                });
             }
             default -> sender.sendMessage("Unknown subcommand. Use: reload, status, reconnect");
         }
@@ -224,6 +255,15 @@ public class GeyserMenuSpigot extends JavaPlugin {
         menuClient.requestReorderButton(buttonName, position);
         sender.sendMessage("§aButton '" + buttonName + "' moved to position " + position);
         return true;
+    }
+
+    private String pluginVersion() {
+        try {
+            return getDescription().getVersion();
+        } catch (Throwable t) {
+            // getDescription() is deprecated on modern Paper/Folia; never let /geysermenu die on it.
+            return "unknown";
+        }
     }
 
     public static GeyserMenuSpigot getInstance() {
