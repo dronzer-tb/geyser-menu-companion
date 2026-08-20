@@ -1,6 +1,6 @@
 plugins {
     java
-    id("com.gradleup.shadow") version "9.0.0-beta4"
+    id("com.gradleup.shadow") version "9.6.1"
     id("com.modrinth.minotaur") version "2.+"
 }
 
@@ -8,11 +8,11 @@ dependencies {
     implementation(project(":common"))
 
     // Velocity API
-    compileOnly("com.velocitypowered:velocity-api:3.3.0-SNAPSHOT")
-    annotationProcessor("com.velocitypowered:velocity-api:3.3.0-SNAPSHOT")
+    compileOnly("com.velocitypowered:velocity-api:3.5.1")
+    annotationProcessor("com.velocitypowered:velocity-api:3.5.1")
 
     // Floodgate for Bedrock player detection
-    compileOnly("org.geysermc.floodgate:api:2.2.3-SNAPSHOT")
+    compileOnly("org.geysermc.floodgate:api:2.2.5-SNAPSHOT")
 }
 
 tasks.shadowJar {

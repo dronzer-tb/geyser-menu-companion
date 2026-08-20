@@ -1,6 +1,6 @@
 plugins {
     java
-    id("com.gradleup.shadow") version "9.0.0-beta4"
+    id("com.gradleup.shadow") version "9.6.1"
     id("com.modrinth.minotaur") version "2.+"
 }
 
@@ -11,7 +11,7 @@ dependencies {
     compileOnly("io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT")
 
     // Floodgate for Bedrock player detection
-    compileOnly("org.geysermc.floodgate:api:2.2.3-SNAPSHOT")
+    compileOnly("org.geysermc.floodgate:api:2.2.5-SNAPSHOT")
 }
 
 tasks.shadowJar {
